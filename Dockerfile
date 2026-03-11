@@ -11,4 +11,4 @@ COPY . .
 
 RUN chmod +x download_images.sh && bash download_images.sh
 
-CMD ["python", "bot.py"]
+CMD ["python", "start.py"]
