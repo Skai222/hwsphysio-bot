@@ -113,7 +113,7 @@ async def ask_ai(chat_id, user_message):
 
     try:
         model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
+            model_name="gemini-2.5-flash",
             system_instruction=SYSTEM_PROMPT,
         )
         chat = model.start_chat(history=gemini_history)
