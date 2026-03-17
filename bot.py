@@ -1,20 +1,33 @@
- #!/usr/bin/env python3
+#!/usr/bin/env python3
+"""
+HWS Physio Bot v3 — Mit KI-Gesundheitsassistent (Google Gemini — KOSTENLOS)
+"""
 import logging, json, os, asyncio
 from datetime import time, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
-import anthropic
+
+import google.generativeai as genai
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, Defaults, filters
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ContextTypes, Defaults, filters,
+)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "DEIN_TELEGRAM_TOKEN")
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "DEIN_ANTHROPIC_KEY")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "DEIN_GEMINI_KEY")
 TIMEZONE = ZoneInfo("Europe/Berlin")
 IMAGES_DIR = Path(__file__).parent / "images"
 DATA_FILE = Path(__file__).parent / "user_data.json"
-SCHEDULE = {"morning": time(hour=7, minute=0, tzinfo=TIMEZONE), "midday": time(hour=12, minute=0, tzinfo=TIMEZONE), "evening": time(hour=19, minute=0, tzinfo=TIMEZONE)}
 
-claude = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+SCHEDULE = {
+    "morning": time(hour=7, minute=0, tzinfo=TIMEZONE),
+    "midday":  time(hour=12, minute=0, tzinfo=TIMEZONE),
+    "evening": time(hour=19, minute=0, tzinfo=TIMEZONE),
+}
+
+# Gemini Client
+genai.configure(api_key=GEMINI_KEY)
 
 SYSTEM_PROMPT = """Du bist Kirills persoenlicher Gesundheitsassistent im Telegram. Du sprichst Deutsch und duzt Kirill.
 
@@ -75,7 +88,8 @@ def set_user(cid, user):
 def get_active_users():
     data = load_data(); return [int(k) for k,v in data.items() if v.get("active")]
 
-async def ask_claude(chat_id, user_message):
+# ─── GEMINI KI-ASSISTENT (KOSTENLOS) ────────────────
+async def ask_ai(chat_id, user_message):
     user = get_user(chat_id)
     context_parts = []
     pain_log = user.get("pain_log", [])
@@ -88,22 +102,40 @@ async def ask_claude(chat_id, user_message):
         context_parts.append("Notizen:\n" + "\n".join([f"  [{n['date']}] {n['note']}" for n in notes[-20:]]))
     context_parts.append(f"Aktuelle Phase: {user.get('phase',1)}, Woche {user.get('week',1)}")
     context = "\n".join(context_parts)
+
     history = user.get("chat_history", [])[-10:]
-    messages = [{"role":m["role"],"content":m["content"]} for m in history]
+    gemini_history = []
+    for msg in history:
+        role = "model" if msg["role"] == "assistant" else "user"
+        gemini_history.append({"role": role, "parts": [msg["content"]]})
+
     full_msg = user_message + (f"\n\n[Kontext: {context}]" if context else "")
-    messages.append({"role":"user","content":full_msg})
+
     try:
-        response = await asyncio.get_event_loop().run_in_executor(None, lambda: claude.messages.create(model="claude-sonnet-4-20250514", max_tokens=1500, system=SYSTEM_PROMPT, messages=messages))
-        answer = response.content[0].text
+        model = genai.GenerativeModel(
+            model_name="gemini-2.0-flash",
+            system_instruction=SYSTEM_PROMPT,
+        )
+        chat = model.start_chat(history=gemini_history)
+        response = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: chat.send_message(full_msg)
+        )
+        answer = response.text
         history.append({"role":"user","content":user_message})
         history.append({"role":"assistant","content":answer})
         user["chat_history"] = history[-20:]
         set_user(chat_id, user)
         return answer
-    except anthropic.AuthenticationError: return "API-Key ungueltig! Pruefe ANTHROPIC_API_KEY."
-    except anthropic.RateLimitError: return "Rate Limit. Warte kurz."
-    except Exception as e: logger.error(f"Claude: {e}"); return f"Fehler: {str(e)[:200]}"
+    except Exception as e:
+        logger.error(f"Gemini: {e}")
+        err = str(e)
+        if "API_KEY" in err or "403" in err:
+            return "API-Key ungueltig! Pruefe GEMINI_API_KEY."
+        if "429" in err or "quota" in err.lower():
+            return "Rate Limit. Warte kurz."
+        return f"Fehler: {err[:200]}"
 
+# ─── UEBUNGSDATENBANK ────────────────────────────
 P1 = {
     "morning": [
         {"photo":"01_ccf_training.jpg","caption":"☀️ <b>Phase 1 — Morgen (1/2)</b>\n━━━━━━━━━━━━━━━━━━\n\n🔹 <b>CCF-TRAINING</b>\n\n📍 Rueckenlage, Knie gebeugt\n📍 Sanft nicken wie Ja — MINIMAL\n📍 Kopf bleibt auf Unterlage\n📍 SCM-Kontrolle: Finger an Hals!\n\n⏱ <b>10 Wdh. x 10 Sek.</b>\n\n💡 <i>Jull 2002: 72% Kopfschmerzreduktion</i>"},
@@ -161,7 +193,7 @@ async def send_exercises(context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     user = get_user(u.effective_chat.id); user["active"]=True; set_user(u.effective_chat.id, user)
-    await u.message.reply_text("✅ <b>HWS Physio Bot v3 + KI-Assistent!</b>\n\n" + PHASE_INFO[user.get('phase',1)] + "\n\n⏰ Uebungen: 07:00, 12:00, 19:00\n\n🤖 <b>KI-Assistent:</b> Schreibe einfach eine Nachricht!\nBeispiele:\n• Welche Supplements bei Tinnitus?\n• Essensplan fuer die Woche\n• Welchen Arzt zuerst?\n• Was ist der SCM?\n\n📋 /phase /schmerz /tagebuch /notiz /arztplan /uebungen /test /reset /stop", parse_mode="HTML")
+    await u.message.reply_text("✅ <b>HWS Physio Bot v3 + Gemini KI!</b>\n\n" + PHASE_INFO[user.get('phase',1)] + "\n\n⏰ Uebungen: 07:00, 12:00, 19:00\n\n🤖 <b>KI-Assistent (KOSTENLOS):</b>\nSchreibe einfach eine Nachricht!\n• Welche Supplements bei Tinnitus?\n• Essensplan fuer die Woche\n• Welchen Arzt zuerst?\n\n📋 /phase /schmerz /tagebuch /notiz /arztplan /uebungen /test /reset /stop", parse_mode="HTML")
 
 async def cmd_phase(u: Update, c: ContextTypes.DEFAULT_TYPE):
     user = get_user(u.effective_chat.id); phase = user.get("phase",1)
@@ -230,7 +262,7 @@ async def cmd_stop(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not u.message or not u.message.text: return
     await c.bot.send_chat_action(chat_id=u.effective_chat.id, action="typing")
-    answer = await ask_claude(u.effective_chat.id, u.message.text)
+    answer = await ask_ai(u.effective_chat.id, u.message.text)
     try: await u.message.reply_text(answer, parse_mode="HTML")
     except: await u.message.reply_text(answer)
 
@@ -241,7 +273,9 @@ async def error_handler(u,c): logger.error(f"Fehler: {c.error}")
 
 def main():
     if BOT_TOKEN == "DEIN_TELEGRAM_TOKEN": print("export BOT_TOKEN='...'"); return
-    if ANTHROPIC_KEY == "DEIN_ANTHROPIC_KEY": print("⚠️ Ohne ANTHROPIC_API_KEY kein KI-Assistent. https://console.anthropic.com")
+    if GEMINI_KEY == "DEIN_GEMINI_KEY":
+        print("⚠️ Ohne GEMINI_API_KEY kein KI-Assistent.")
+        print("   Key holen: https://aistudio.google.com/apikey")
     app = Application.builder().token(BOT_TOKEN).defaults(Defaults(parse_mode="HTML",tzinfo=TIMEZONE)).post_init(post_init).build()
     for cmd,fn in [("start",cmd_start),("phase",cmd_phase),("schmerz",cmd_schmerz),("tagebuch",cmd_tagebuch),("notiz",cmd_notiz),("uebungen",cmd_uebungen),("arztplan",cmd_arztplan),("test",cmd_test),("reset",cmd_reset),("stop",cmd_stop)]:
         app.add_handler(CommandHandler(cmd,fn))
@@ -250,7 +284,12 @@ def main():
     app.add_error_handler(error_handler)
     jq = app.job_queue
     for name,t in SCHEDULE.items(): jq.run_daily(send_exercises,t,data=name,name=name)
-    print("🏥 HWS Physio Bot v3 + KI laeuft!")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("🏥 HWS Physio Bot v3 + Gemini KI (KOSTENLOS)")
+    print(f"📋 User: {len(get_active_users())}")
+    print(f"🤖 Gemini: {'✅ Aktiv' if GEMINI_KEY != 'DEIN_GEMINI_KEY' else '❌ Kein Key'}")
+    print("⏰ Jobs: 07:00, 12:00, 19:00 MEZ")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     app.run_polling()
 
 if __name__ == "__main__": main()
